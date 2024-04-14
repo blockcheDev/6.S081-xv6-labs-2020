@@ -1,6 +1,7 @@
 {
     "files.associations": {
         "*.tmpl": "html",
-        "fs.h": "c"
+        "fs.h": "c",
+        "param.h": "c"
     }
 }
