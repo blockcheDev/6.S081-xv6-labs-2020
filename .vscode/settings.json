@@ -1,3 +1,7 @@
 {
-    "commentTranslate.source": "Bing"
+    "commentTranslate.source": "Bing",
+    "files.associations": {
+        "*.tmpl": "html",
+        "defs.h": "c"
+    }
 }
