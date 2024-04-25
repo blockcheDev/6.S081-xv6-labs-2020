@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -47,6 +49,25 @@ kvminit()
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+// void vminit(pagetable_t *pagetable_ptr) {
+//   *pagetable_ptr = (pagetable_t) kalloc();
+//   memset(*pagetable_ptr, 0, PGSIZE);
+
+//   vmmap(*pagetable_ptr, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+//   vmmap(*pagetable_ptr, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+//   vmmap(*pagetable_ptr, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+//   vmmap(*pagetable_ptr, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+//   vmmap(*pagetable_ptr, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+//   vmmap(*pagetable_ptr, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+//   vmmap(*pagetable_ptr, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+// }
+
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void
@@ -55,6 +76,11 @@ kvminithart()
   w_satp(MAKE_SATP(kernel_pagetable));
   sfence_vma();
 }
+
+// void vminithart(pagetable_t pagetable) {
+//   w_satp(MAKE_SATP(pagetable));
+//   sfence_vma();
+// }
 
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
@@ -121,6 +147,11 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
     panic("kvmmap");
 }
 
+void vmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
+  if(mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("vmmap");
+}
+
 // translate a kernel virtual address to
 // a physical address. only needed for
 // addresses on the stack.
@@ -132,7 +163,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kpagetable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -439,4 +470,26 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+void vmprint_dfs(pagetable_t pagetable, int level) {
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {
+      for (int j = 1; j < level; j++) {
+        printf(".. ");
+      }
+      printf("..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        vmprint_dfs((pagetable_t)PTE2PA(pte), level + 1);
+      }
+    }
+  }
+}
+
+void vmprint(pagetable_t pagetable) {
+  printf("page table %p\n", pagetable);
+
+  vmprint_dfs(pagetable, 1);
 }

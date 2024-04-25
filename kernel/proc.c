@@ -21,6 +21,8 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+extern char etext[];  // kernel.ld sets this to end of kernel code.
+
 // initialize the proc table at boot time.
 void
 procinit(void)
@@ -31,15 +33,15 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
 
-      // Allocate a page for the process's kernel stack.
-      // Map it high in memory, followed by an invalid
-      // guard page.
-      char *pa = kalloc();
-      if(pa == 0)
-        panic("kalloc");
-      uint64 va = KSTACK((int) (p - proc));
-      kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      // // Allocate a page for the process's kernel stack.
+      // // Map it high in memory, followed by an invalid
+      // // guard page.
+      // char *pa = kalloc();
+      // if(pa == 0)
+      //   panic("kalloc");
+      // uint64 va = KSTACK((int) (p - proc));
+      // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+      // p->kstack = va;
   }
   kvminithart();
 }
@@ -121,6 +123,23 @@ found:
     return 0;
   }
 
+  // 分配内核页表 
+  p->kpagetable = proc_kpagetable();
+  if (p->kpagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
+  // 分配内核栈
+  char *pa = kalloc();
+  if(pa == 0) {
+    panic("kalloc");
+  }
+  uint64 va = KSTACK(0);
+  vmmap(p->kpagetable, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  p->kstack = va;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -149,6 +168,19 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+
+  // free 内核栈
+  if (p->kstack) {
+    uvmunmap(p->kpagetable, p->kstack, 1, 1);
+    p->kstack = 0;
+  }
+
+  // free 内核页表
+  if (p->kpagetable) {
+    proc_freekpagetable(p->kpagetable);
+    p->kpagetable = 0;
+  }
+
   p->state = UNUSED;
 }
 
@@ -185,6 +217,23 @@ proc_pagetable(struct proc *p)
   return pagetable;
 }
 
+pagetable_t proc_kpagetable() {
+  pagetable_t kpagetable = uvmcreate();
+  if (kpagetable == 0) {
+    return 0;
+  }
+
+  vmmap(kpagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  vmmap(kpagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  vmmap(kpagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+  vmmap(kpagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  vmmap(kpagetable, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  vmmap(kpagetable, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  vmmap(kpagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return kpagetable;
+}
+
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
@@ -193,6 +242,29 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
+}
+
+void proc_freekpagetable(pagetable_t pagetable) {
+  // uvmunmap(pagetable, UART0, 1, 0);
+  // uvmunmap(pagetable, VIRTIO0, 1, 0);
+  // uvmunmap(pagetable, CLINT, 0x10000 / PGSIZE, 0);
+  // uvmunmap(pagetable, PLIC, 0x400000 / PGSIZE, 0);
+  // uvmunmap(pagetable, KERNBASE, (PHYSTOP - KERNBASE) / PGSIZE, 0);
+  // // uvmunmap(pagetable, (uint64)etext, (PHYSTOP-(uint64)etext) / PGSIZE, 0);
+  // uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+  // // freewalk_without_leaf(pagetable);
+  // uvmfree(pagetable, 0);
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if(pte & PTE_V){
+      if ((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+        uint64 child = PTE2PA(pte);
+        proc_freekpagetable((pagetable_t)child);
+      }
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);  
 }
 
 // a user program that calls exec("/init")
@@ -473,7 +545,14 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        // 切换为进程的内核页表
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        kvminithart();             // 切换为全局内核页表
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -483,6 +562,7 @@ scheduler(void)
       }
       release(&p->lock);
     }
+
 #if !defined (LAB_FS)
     if(found == 0) {
       intr_on();
